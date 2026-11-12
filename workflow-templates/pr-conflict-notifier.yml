@@ -3,8 +3,8 @@
 #
 # When main (or any branch PRs target) changes, it checks every open, non-draft PR in this repo.
 # If a PR has conflicts, it posts one comment @-mentioning the author, which triggers their
-# notification email. When the conflict is resolved, it deletes that comment, so if the PR
-# conflicts again later the author is notified again.
+# notification email, and adds a "has conflicts" label. When the conflict is resolved, it deletes
+# that comment and removes the label, so if the PR conflicts again later the author is notified again.
 
 name: Notify PR authors of merge conflicts
 
@@ -33,6 +33,7 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
             const MARKER = '<!-- merge-conflict-notice -->';
+            const LABEL = 'has conflicts';
             const sleep = ms => new Promise(r => setTimeout(r, ms));
 
             // After a push, GitHub recalculates mergeability in the background,
@@ -75,5 +76,14 @@ jobs:
               } else if (!conflicted && notice) {
                 await github.rest.issues.deleteComment({ owner, repo, comment_id: notice.id });
                 core.info(`Conflict resolved, notice removed on #${p.number}`);
+              }
+
+              // Keep the label in sync (GitHub creates the label the first time it's added).
+              const labelled = pr.labels.some(l => l.name === LABEL);
+              if (conflicted && !labelled) {
+                await github.rest.issues.addLabels({ owner, repo, issue_number: p.number, labels: [LABEL] });
+              } else if (!conflicted && labelled) {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: p.number, name: LABEL })
+                  .catch(e => { if (e.status !== 404) throw e; });
               }
             }
