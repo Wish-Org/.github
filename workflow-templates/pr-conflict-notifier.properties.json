@@ -1,5 +1,5 @@
 {
   "name": "PR conflict notifier",
-  "description": "Comments and @-mentions the PR author when their pull request has merge conflicts.",
+  "description": "Comments, @-mentions the author and adds a \"has conflicts\" label when a pull request has merge conflicts.",
   "iconName": "octicon git-pull-request"
 }
