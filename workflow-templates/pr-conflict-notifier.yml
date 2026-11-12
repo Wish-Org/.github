@@ -1,0 +1,79 @@
+# Merge conflict notifier: one per repo, GitHub-native only (no apps, no third-party actions).
+# Add to each repo at .github/workflows/pr-conflict-notifier.yml
+#
+# When main (or any branch PRs target) changes, it checks every open, non-draft PR in this repo.
+# If a PR has conflicts, it posts one comment @-mentioning the author, which triggers their
+# notification email. When the conflict is resolved, it deletes that comment, so if the PR
+# conflicts again later the author is notified again.
+
+name: Notify PR authors of merge conflicts
+
+on:
+  push:                        # a push to a base branch is what creates new conflicts
+  pull_request_target:
+    types: [synchronize, reopened, ready_for_review]   # re-check after the author pushes a fix
+  schedule:
+    - cron: "17 */6 * * *"     # safety net every 6 hours (UTC)
+  workflow_dispatch: {}
+
+permissions:
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-conflict-notifier
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const MARKER = '<!-- merge-conflict-notice -->';
+            const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+            // After a push, GitHub recalculates mergeability in the background,
+            // so mergeable can be null at first. Retry a few times.
+            async function getPr(pull_number) {
+              for (let i = 0; i < 6; i++) {
+                const { data } = await github.rest.pulls.get({ owner, repo, pull_number });
+                if (data.mergeable !== null) return data;
+                await sleep(5000);
+              }
+              return null; // still unknown; the next run will catch it
+            }
+
+            const prs = await github.paginate(github.rest.pulls.list,
+              { owner, repo, state: 'open', per_page: 100 });
+
+            // On a push, only PRs that target the pushed branch can have gained a conflict.
+            const pushedBranch = context.eventName === 'push'
+              ? context.ref.replace('refs/heads/', '') : null;
+
+            for (const p of prs) {
+              if (p.draft) continue;
+              if (pushedBranch && p.base.ref !== pushedBranch && p.head.ref !== pushedBranch) continue;
+
+              const pr = await getPr(p.number);
+              if (!pr) continue;
+
+              const conflicted = pr.mergeable_state === 'dirty';
+              const comments = await github.paginate(github.rest.issues.listComments,
+                { owner, repo, issue_number: p.number, per_page: 100 });
+              const notice = comments.find(c => c.body && c.body.includes(MARKER));
+
+              if (conflicted && !notice) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: p.number,
+                  body: `${MARKER}\n@${pr.user.login} this PR has merge conflicts with \`${pr.base.ref}\`. ` +
+                        `Please resolve them so it can be reviewed and merged.`,
+                });
+                core.info(`Notified ${pr.user.login} on #${p.number}`);
+              } else if (!conflicted && notice) {
+                await github.rest.issues.deleteComment({ owner, repo, comment_id: notice.id });
+                core.info(`Conflict resolved, notice removed on #${p.number}`);
+              }
+            }
